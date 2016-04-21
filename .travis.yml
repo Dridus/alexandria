@@ -26,3 +26,4 @@ install:
 
 script:
   - stack --no-terminal --skip-ghc-check test
+
