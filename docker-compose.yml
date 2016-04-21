@@ -1,0 +1,21 @@
+version: "2"
+
+services:
+  alexandria:
+    image: alexandria-server:latest
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+    environment:
+      - "PGHOST=alexandria"
+      - "PGUSER=alexandria"
+      - "PGPASS=alexandria"
+      - "PGDATABASE=alexandria"
+  postgres:
+    image: postgres:9.5.2
+    environment:
+      - POSTGRES_USER=alexandria
+      - POSTGRES_PASSWORD=alexandria
+    volumes:
+      - "/mnt/sda1/alexandria-data:/var/lib/postgresql/data"

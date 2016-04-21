@@ -3,45 +3,49 @@
 module Model where
 
 import ClassyPrelude.Yesod
-import Control.Lens (_Just, at, preview, view, toListOf, each, to)
+import Control.Lens (_Just, at, preview, view, to)
 import Database.Persist.Quasi
-import ModelOrphans
+import ModelOrphans ()
 import qualified Slack
 
 type FieldPair = (Bool, Text)
 
+type SlackChannelId = Slack.ID Slack.Channel
+type SlackUserId    = Slack.ID Slack.User
+
 share [mkPersist sqlSettings { mpsGenerateLenses = True }, mkMigrate "migrateAll"]
   $(persistFileWith lowerCaseSettings "config/models")
 
-fromSlackUser :: Slack.User -> User
+fromSlackUser :: Slack.User -> Entity User
 fromSlackUser = Entity
-  <$> view Slack.userID
+  <$> view (Slack.userID . to UserKey)
   <*> ( User
     <$> view Slack.userName
     <*> view Slack.userRealName
     <*> view Slack.userDeleted
     <*> view Slack.userColor
-    <*> preview (Slack.userTz . Slack.tz)
-    <*> preview (Slack.userTz . Slack.tzLabel)
-    <*> preview (Slack.userTz . Slack.tzOffset)
+    <*> preview (Slack.userTz . _Just . Slack.tz)
+    <*> preview (Slack.userTz . _Just . Slack.tzLabel)
+    <*> preview (Slack.userTz . _Just . Slack.tzOffset)
     <*> preview (Slack.userProfile . Slack.profileImages . at 72 . _Just)
     <*> preview (Slack.userProfile . Slack.profileImages . at 512 . _Just) )
 
 fromSlackChannel :: Slack.Channel -> Entity Channel
 fromSlackChannel = Entity
-  <$> view Slack.channelID
+  <$> view (Slack.channelID . to ChannelKey)
   <*> ( Channel
     <$> view Slack.channelName
     <*> view Slack.channelIsArchived
     <*> view Slack.channelIsGeneral
-    <*> map (fromMaybe "") . view (Slack.channelTopic . Slack.trackedValue) )
+    <*> fromMaybe "" . preview (Slack.channelTopic . _Just . Slack.trackedValue) )
 
 fromSlackMessage :: Slack.Message -> Maybe Message
 fromSlackMessage message =
-  flip fromMessageWithChannel message <$> preview (Slack.messageChat . _Just . Slack.typedID)
+  flip fromMessageWithChannel message
+    <$> preview (Slack.messageChat . _Just . Slack.typedID) message
   where
-    fromMessageWithChannel channelID = Message
-      <$> pure (ChannelKey channelID)
+    fromMessageWithChannel channelKey = Message
+      <$> pure channelKey
       <*> view Slack.messageTS
       <*> view Slack.messageUser
       <*> view Slack.messageText
@@ -51,6 +55,7 @@ fromSlackMessage message =
 fromSlackAttachment :: MessageId -> Slack.Attachment -> MessageAttachment
 fromSlackAttachment messageId = MessageAttachment
   <$> pure messageId
+  <*> view Slack.attachmentId
   <*> view Slack.attachmentFallback
   <*> view Slack.attachmentColor
   <*> view Slack.attachmentPretext
@@ -59,14 +64,14 @@ fromSlackAttachment messageId = MessageAttachment
   <*> view Slack.attachmentAuthorIcon
   <*> view Slack.attachmentTitle
   <*> view Slack.attachmentTitleLink
-  <*> view Slack.attachmentFields
-      . to ( mapFromList
-           . map ( view Slack.fieldTitle
-               &&& ((,) <$> view Slack.fieldShort <*> view Slack.fieldValue) ) )
+  <*> view ( Slack.attachmentFields
+           . to ( mapFromList
+                . map ( view Slack.fieldTitle
+                    &&& ((,) <$> view Slack.fieldShort <*> view Slack.fieldValue) ) ) )
 
 fromSlackMessageReaction :: MessageId -> Slack.MessageReaction -> MessageReaction
 fromSlackMessageReaction messageId = MessageReaction
   <$> pure messageId
   <*> view Slack.messageReactionName
   <*> view Slack.messageReactionCount
-  <*> toListOf (Slack.messageReactionUsers . each . to UserKey)
+  <*> view Slack.messageReactionUsers

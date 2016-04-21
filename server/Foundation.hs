@@ -2,11 +2,8 @@ module Foundation where
 
 import Import.NoFoundation
 import Database.Persist.Sql (ConnectionPool, runSqlPool)
-import Yesod.Default.Util   (addStaticContentExternal)
 import Yesod.Core.Types     (Logger)
 import qualified Yesod.Core.Unsafe as Unsafe
-import qualified Data.CaseInsensitive as CI
-import qualified Data.Text.Encoding as TE
 
 data App = App
   { appSettings    :: AppSettings
@@ -37,7 +34,7 @@ instance Yesod App where
 
   shouldLog app _source level =
     appShouldLogAll (appSettings app)
-      || level == LevelWarn
+      || level == LevelInfo
       || level == LevelError
 
   makeLogger = pure . appLogger

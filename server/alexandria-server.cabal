@@ -25,6 +25,7 @@ library
                      Slack
                      Handler.Common
                      Handler.Home
+                     TextShowOrphans
 
     if flag(dev) || flag(library-only)
         cpp-options:   -DDEVELOPMENT
@@ -54,6 +55,7 @@ library
                         StandaloneDeriving
                         GeneralizedNewtypeDeriving
                         ScopedTypeVariables
+                        OverloadedStrings
 
 
     build-depends: base

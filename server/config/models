@@ -1,9 +1,9 @@
 Message json
-  channel ChannelId
+  channel SlackChannelId
   ts Slack.TS
-  user UserId
+  user SlackUserId
   text Text
-  editedUser UserId Maybe
+  editedUser SlackUserId Maybe
   editedTs Slack.TS Maybe
   UniqueMessage channel ts
 
@@ -25,23 +25,23 @@ MessageReaction json
   message MessageId
   name Text
   count Int
-  users [UserId]
+  users [SlackUserId]
   UniqueMessageReaction message name
 
 User json
-  Id (Slack.ID Slack.User)
+  Id SlackUserId
   name Text
-  realName Text
+  realName Text Maybe
   deleted Bool
-  color Text
-  tz Text
-  tzLabel Text
-  tzOffset Int
+  color Text Maybe
+  tz Text Maybe
+  tzLabel Text Maybe
+  tzOffset Int Maybe
   image72 Text Maybe
   image512 Text Maybe
 
 Channel json
-  Id (Slack.ID Slack.Channel)
+  Id SlackChannelId
   name Text
   isArchived Bool
   isGeneral Bool

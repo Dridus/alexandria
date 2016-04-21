@@ -3,8 +3,8 @@ module Slack where
 import           ClassyPrelude
 import           Control.Lens (Getter, Prism', prism', view, to)
 import           Control.Lens.TH (makeLenses, makePrisms)
-import           Data.Aeson ((.:), (.:?), (.=), (.!=), Value(Object, String), Object, FromJSON(parseJSON), ToJSON(toJSON), object, withText, withObject, withScientific, withText)
-import           Data.Aeson.Types (Parser)
+import           Data.Aeson ((.:), (.:?), (.=), (.!=), Value(Number, Object, String), Object, FromJSON(parseJSON), ToJSON(toJSON), object, withText, withObject, withScientific, withText)
+import           Data.Aeson.Types (Parser, typeMismatch)
 import qualified Data.HashMap.Strict as HM
 import           Data.Proxy (Proxy(Proxy))
 import           Data.Scientific (toBoundedInteger)
@@ -16,15 +16,19 @@ import           TextShowOrphans ()
 newtype TS = TS { unTS :: Text } deriving (Eq, Ord, Read, Show)
 instance FromJSON TS where
   parseJSON = withText "timestamp" $ pure . TS
+instance ToJSON TS where
+  toJSON = toJSON . unTS
 makePrisms ''TS
 deriveTextShow ''TS
 
 newtype Time = Time { unTime :: Word32 } deriving (Eq, Ord, Read, Show)
 instance FromJSON Time where
-  parseJSON = withScientific "time" $ \ s ->
+  parseJSON (String s) = maybe (fail $ "tried to parse " <> show s <> " as time but couldn't") (pure . Time) $ readMay s
+  parseJSON (Number s) =
     case toBoundedInteger s of
       Just w32 -> pure (Time w32)
       Nothing  -> fail . unpack $ "out of bound unix time " <> showt (FromStringShow s)
+  parseJSON other = typeMismatch "time as string or number" other
 makePrisms ''Time
 deriveTextShow ''Time
 
@@ -85,9 +89,9 @@ data Team = Team
 data User = User
   { _userID                :: ID User
   , _userName              :: Text
-  , _userRealName          :: Text
+  , _userRealName          :: Maybe Text
   , _userDeleted           :: Bool
-  , _userColor             :: Text
+  , _userColor             :: Maybe Text
   , _userTz                :: Maybe Tz
   , _userProfile           :: Profile
   , _userIsAdmin           :: Bool
@@ -622,16 +626,16 @@ instance FromJSON User where
   parseJSON = withObject "user object" $ \ o -> User
     <$> o .: "id"
     <*> o .: "name"
-    <*> o .: "real_name"
+    <*> o .:? "real_name"
     <*> o .: "deleted"
-    <*> o .: "color"
+    <*> o .:? "color"
     <*> ((Just <$> parseJSON (Object o)) <|> pure Nothing) -- tz
     <*> o .: "profile"
-    <*> o .: "is_admin"
-    <*> o .: "is_owner"
-    <*> o .: "is_primary_owner"
-    <*> o .: "is_restricted"
-    <*> o .: "is_ultra_restricted"
+    <*> o .:? "is_admin" .!= False
+    <*> o .:? "is_owner" .!= False
+    <*> o .:? "is_primary_owner" .!= False
+    <*> o .:? "is_restricted" .!= False
+    <*> o .:? "is_ultra_restricted" .!= False
     <*> o .:? "has_2fa" .!= False
     <*> o .:? "two_factor_type"
     <*> o .:? "has_files" .!= False

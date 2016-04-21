@@ -14,8 +14,10 @@ module Application
     ) where
 
 import Control.Monad.Logger                 (liftLoc, runLoggingT)
+import Data.Function                        (fix)
 import Database.Persist.Postgresql          (createPostgresqlPool, pgConnStr,
                                              pgPoolSize, runSqlPool)
+import Database.Persist.Sql                 (Single(Single), rawSql)
 import Import
 import Language.Haskell.TH.Syntax           (qLocation)
 import Network.Wai (Middleware)
@@ -44,12 +46,22 @@ makeFoundation appSettings = do
     (appStaticDir appSettings)
 
   let mkFoundation appConnPool = App {..}
-    tempFoundation = mkFoundation $ error "connPool forced in tempFoundation"
-    logFunc = messageLoggerSource tempFoundation appLogger
+      tempFoundation           = mkFoundation $ error "connPool forced in tempFoundation"
+      logFunc                  = messageLoggerSource tempFoundation appLogger
 
   pool <- flip runLoggingT logFunc $ createPostgresqlPool
     (pgConnStr  $ appDatabaseConf appSettings)
     (pgPoolSize $ appDatabaseConf appSettings)
+
+  flip runLoggingT logFunc $ do
+    $logInfo $ "Checking connection to Postgres..."
+    fix $ \ tryAgain ->
+      catch ( do [Single version] <- runSqlPool (rawSql "SELECT version()" []) pool
+                 $logInfo $ "Connected to Postgres: " <> version )
+            ( \ (ex :: SomeException) ->
+              do $logDebug $ "Failed to connect to Postgres: " <> tshow ex
+                 threadDelay 1000000
+                 tryAgain )
 
   runLoggingT (runSqlPool (runMigration migrateAll) pool) logFunc
 
