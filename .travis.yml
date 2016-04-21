@@ -19,11 +19,10 @@ before_install:
   - mkdir -p ~/.local/bin
   - export PATH=$HOME/.local/bin:$PATH
   - travis_retry curl -L https://www.stackage.org/stack/linux-x86_64 | tar xz --wildcards --strip-components=1 -C ~/.local/bin '*/stack'
+  - sudo apt-get -qq update
+  - sudo apt-get install -y node libpq5 libgmp10
 
 install:
-  - stack --no-terminal --skip-ghc-check setup
-  - stack build --no-terminal --skip-ghc-check --only-snapshot
-
-script:
-  - stack --no-terminal --skip-ghc-check test
+  - make setup
+  - make
 
