@@ -6,6 +6,7 @@ if [ -z "$1" ]; then
 fi
 
 target_dir="$( cd $1 && pwd )"
+shift
 
 docker-compose up -d postgres
 sleep 1
@@ -19,5 +20,5 @@ docker run \
   -v "$target_dir:/data" \
   alexandria-server:latest \
   /alexandria-importer \
-  -s settings.yml /data
+  -s settings.yml /data "$@"
 docker-compose stop postgres

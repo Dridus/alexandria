@@ -3,7 +3,7 @@ module Slack where
 import           ClassyPrelude
 import           Control.Lens (Getter, Prism', prism', view, to)
 import           Control.Lens.TH (makeLenses, makePrisms)
-import           Data.Aeson ((.:), (.:?), (.=), (.!=), Value(Number, Object, String), Object, FromJSON(parseJSON), ToJSON(toJSON), object, withText, withObject, withScientific, withText)
+import           Data.Aeson ((.:), (.:?), (.=), (.!=), Value(Number, Object, String), Object, FromJSON(parseJSON), ToJSON(toJSON), object, withText, withObject, withText)
 import           Data.Aeson.Types (Parser, typeMismatch)
 import qualified Data.HashMap.Strict as HM
 import           Data.Proxy (Proxy(Proxy))
@@ -462,6 +462,9 @@ deriving instance Eq Group
 deriving instance Eq IM
 deriving instance Eq Bot
 deriving instance Eq MessageSubtype
+deriving instance Enum MessageSubtype
+deriving instance Ord MessageSubtype
+deriving instance Bounded MessageSubtype
 deriving instance Eq MessageReaction
 deriving instance Eq Message
 deriving instance Eq MessageEdited
@@ -756,6 +759,30 @@ instance FromJSON MessageSubtype where
     "file_comment"      -> pure FileCommentMS
     "file_mention"      -> pure FileMentionMS
     other               -> fail . unpack $ "unknown message subtype " <> other
+
+instance ToJSON MessageSubtype where
+  toJSON = toJSON . \ case
+    BotMS              -> asText "bot_message"
+    MeMS               -> "me_message"
+    ChangedMS          -> "message_changed"
+    DeletedMS          -> "message_deleted"
+    ChannelJoinMS      -> "channel_join"
+    ChannelLeaveMS     -> "channel_leave"
+    ChannelTopicMS     -> "channel_topic"
+    ChannelPurposeMS   -> "channel_purpose"
+    ChannelNameMS      -> "channel_name"
+    ChannelArchiveMS   -> "channel_archive"
+    ChannelUnarchiveMS -> "channel_unarchive"
+    GroupJoinMS        -> "group_join"
+    GroupLeaveMS       -> "group_leave"
+    GroupTopicMS       -> "group_topic"
+    GroupPurposeMS     -> "group_purpose"
+    GroupNameMS        -> "group_name"
+    GroupArchiveMS     -> "group_archive"
+    GroupUnarchiveMS   -> "group_unarchive"
+    FileShareMS        -> "file_share"
+    FileCommentMS      -> "file_comment"
+    FileMentionMS      -> "file_mention"
 
 instance FromJSON MessageEdited where
   parseJSON = withObject "message edited object" $ \ o -> MessageEdited

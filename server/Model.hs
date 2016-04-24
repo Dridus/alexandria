@@ -48,6 +48,7 @@ fromSlackMessage message =
       <$> pure channelKey
       <*> view Slack.messageTS
       <*> view Slack.messageUser
+      <*> view Slack.messageSubtype
       <*> view Slack.messageText
       <*> preview (Slack.messageEdited . _Just . Slack.messageEditedUser)
       <*> preview (Slack.messageEdited . _Just . Slack.messageEditedTS)

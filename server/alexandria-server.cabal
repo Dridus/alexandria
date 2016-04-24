@@ -97,6 +97,9 @@ library
                  , optparse-applicative
                  , path-pieces
                  , http-api-data
+                 , mtl
+                 , directory
+                 , filepath
 
 executable         alexandria-server
     if flag(library-only)

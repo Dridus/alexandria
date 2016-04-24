@@ -2,6 +2,7 @@ Message json
   channel SlackChannelId
   ts Slack.TS
   user SlackUserId
+  subtype Slack.MessageSubtype Maybe
   text Text
   editedUser SlackUserId Maybe
   editedTs Slack.TS Maybe

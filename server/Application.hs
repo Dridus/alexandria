@@ -13,24 +13,25 @@ module Application
     , db
     ) where
 
-import Control.Monad.Logger                 (liftLoc, runLoggingT)
-import Data.Function                        (fix)
-import Database.Persist.Postgresql          (createPostgresqlPool, pgConnStr,
-                                             pgPoolSize, runSqlPool)
-import Database.Persist.Sql                 (Single(Single), rawSql)
-import Import
-import Language.Haskell.TH.Syntax           (qLocation)
+import Control.Monad.Logger (liftLoc, runLoggingT)
+import Control.Monad.Reader.Class (asks)
+import Control.Monad.Writer.Class (tell)
+import Data.Function (fix)
+import Data.Proxy (Proxy(Proxy))
+import qualified Data.Text as T
+import Database.Persist.Postgresql (createPostgresqlPool, pgConnStr, pgPoolSize, runSqlPool)
+import Database.Persist.Sql (Migration, Single(Single, unSingle), connEscapeName, rawSql)
+import Import hiding (Proxy)
+import Language.Haskell.TH.Syntax (qLocation)
 import Network.Wai (Middleware)
-import Network.Wai.Handler.Warp             (Settings, defaultSettings,
-                                             defaultShouldDisplayException,
-                                             runSettings, setHost,
-                                             setOnException, setPort, getPort)
-import Network.Wai.Middleware.RequestLogger (Destination (Logger),
-                                             IPAddrSource (..),
-                                             OutputFormat (..), destination,
-                                             mkRequestLogger, outputFormat)
-import System.Log.FastLogger                (defaultBufSize, newStdoutLoggerSet,
-                                             toLogStr)
+import Network.Wai.Handler.Warp
+       ( Settings, defaultSettings, defaultShouldDisplayException, runSettings
+       , setHost, setOnException, setPort, getPort )
+import Network.Wai.Middleware.RequestLogger
+       ( Destination(Logger), IPAddrSource(..), OutputFormat(..), destination, mkRequestLogger, outputFormat)
+import Slack (MessageSubtype)
+import System.Log.FastLogger (defaultBufSize, newStdoutLoggerSet, toLogStr)
+import TextShow (TextShow, showt)
 
 import Handler.Common
 import Handler.Home
@@ -63,9 +64,49 @@ makeFoundation appSettings = do
                  threadDelay 1000000
                  tryAgain )
 
-  runLoggingT (runSqlPool (runMigration migrateAll) pool) logFunc
+  runLoggingT (runSqlPool (runMigration $ createTypes >> migrateAll) pool) logFunc
 
   return $ mkFoundation pool
+
+createTypes :: Migration
+createTypes =
+  createEnum "message_subtype" (Proxy :: Proxy MessageSubtype)
+
+createEnum :: forall proxy a. (Bounded a, Enum a, Ord a, PersistField a, TextShow a) => Text -> proxy a -> Migration
+createEnum typname _ = do
+  escape <- asks connEscapeName
+  let typnameDb = DBName typname
+      -- FIXME?
+      quoteValue = T.replace "'" "''" 
+                 . (\ case PersistText t -> t
+                           _ -> error "expected enums to make strings when converted")
+                 . toPersistValue
+      allValues = setFromList [minBound .. maxBound] :: Set a
+  (lift . lift $ rawSql "SELECT oid, typtype FROM pg_type WHERE typname = ?" [toPersistValue typname]) >>= \ case
+    [] -> 
+      let quotedValues = intercalate ", " (map (\ value -> "'" <> quoteValue value <> "'") . toList $ allValues)
+      in lift . tell $ [(False, "CREATE TYPE " <> escape typnameDb <> " AS ENUM(" <> quotedValues <> ")")]
+
+    [(Single oid, Single "e")] -> do
+      existingValues <- setFromList . map unSingle
+                    <$> (lift . lift $ rawSql "SELECT enumlabel FROM pg_enum WHERE enumtypid = ?" [oid])
+      let missingValues = allValues `difference` existingValues
+          extraValues = existingValues `difference` allValues
+
+          addValue value = "ALTER TYPE " <> escape typnameDb <> " ADD VALUE '" <> quoteValue value
+
+      unless (null extraValues) $
+        tell $ [typname <> " has extra enum values " <> showt (toList extraValues)]
+      unless (null missingValues) $
+        lift . tell . map ((False,) . addValue) . toList $ missingValues
+
+      pure ()
+
+    [(Single _, Single other)] ->
+      tell $ [typname <> " exists but is of type " <> other <> " not e (enum)"]
+
+    rows ->
+      tell $ ["Got multiple results for the " <> typname <> " query?"] ++ map tshow rows
 
 makeApplication :: App -> IO Application
 makeApplication foundation = do
