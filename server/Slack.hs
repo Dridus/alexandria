@@ -1,42 +1,63 @@
 module Slack where
 
 import           ClassyPrelude
+import           Control.Monad (mfilter)
+import           Control.Monad.Except (ExceptT(ExceptT))
 import           Control.Lens (Getter, Prism', prism', view, to)
 import           Control.Lens.TH (makeLenses, makePrisms)
-import           Data.Aeson ((.:), (.:?), (.=), (.!=), Value(Number, Object, String), Object, FromJSON(parseJSON), ToJSON(toJSON), object, withText, withObject, withText)
-import           Data.Aeson.Types (Parser, typeMismatch)
+import           Data.Aeson ((.=), Value(Number, String), Object, FromJSON(parseJSON), ToJSON(toJSON), object)
+import qualified Data.Aeson.BetterErrors as ABE
+import qualified Data.Aeson.BetterErrors.Internal as ABEI
 import qualified Data.HashMap.Strict as HM
 import           Data.Proxy (Proxy(Proxy))
 import           Data.Scientific (toBoundedInteger)
-import           TextShow (FromStringShow(FromStringShow), TextShow(showb), showt)
+import           Data.Text (splitOn)
+import           Data.Time.Clock.POSIX (posixSecondsToUTCTime)
+import           TextShow (TextShow(showb))
 import           TextShow.TH (deriveTextShow)
 
 import           TextShowOrphans ()
 
-newtype TS = TS { unTS :: Text } deriving (Eq, Ord, Read, Show)
-instance FromJSON TS where
-  parseJSON = withText "timestamp" $ pure . TS
-instance ToJSON TS where
-  toJSON = toJSON . unTS
-makePrisms ''TS
+data TS = TS { _tsTime :: Word32, _tsUnique :: Word32 } deriving (Eq, Ord, Read, Show)
+asTS :: ABE.Parse Text TS
+asTS = ABE.asText >>= either ABE.throwCustomError pure . ts
+ts :: Text -> Either Text TS
+ts t = case splitOn "." t of
+  [readMay -> Just time, readMay -> Just unique] -> Right $ TS time unique
+  other -> Left $ "couldn't parse as a time.unique pair, got parts: " <> tshow other
+unTS :: TS -> Text
+unTS (TS t u) = tshow t <> "." <> tshow u
+tsToUTCTime :: TS -> UTCTime
+tsToUTCTime (TS t _) = posixSecondsToUTCTime (fromIntegral t)
+instance FromJSON TS where parseJSON = ABE.toAesonParser id asTS
+instance ToJSON TS where toJSON = toJSON . unTS
+makeLenses ''TS
 deriveTextShow ''TS
 
 newtype Time = Time { unTime :: Word32 } deriving (Eq, Ord, Read, Show)
-instance FromJSON Time where
-  parseJSON (String s) = maybe (fail $ "tried to parse " <> show s <> " as time but couldn't") (pure . Time) $ readMay s
-  parseJSON (Number s) =
-    case toBoundedInteger s of
-      Just w32 -> pure (Time w32)
-      Nothing  -> fail . unpack $ "out of bound unix time " <> showt (FromStringShow s)
-  parseJSON other = typeMismatch "time as string or number" other
+asTime :: ABE.Parse Text Time
+asTime =
+  ABEI.ParseT . ReaderT $ \ (ABEI.ParseReader path value) ->
+    ExceptT . Identity $ case value of
+      String s | Just t <- readMay s ->
+        Right (Time t)
+      String s ->
+        Left (ABEI.BadSchema (toList path) . ABEI.CustomError $ "tried to parse " <> tshow s <> " as time but couldn't")
+      Number s | Just w32 <- toBoundedInteger s ->
+        Right (Time w32)
+      Number s ->
+        Left . ABEI.BadSchema (toList path) . ABEI.CustomError $ "out of bound unix time " <> tshow s
+      other ->
+        Left . ABEI.BadSchema (toList path) . ABEI.CustomError $ "expected a time as string or number not " <> tshow other
+instance ToJSON Time where toJSON = toJSON . unTime
 makePrisms ''Time
 deriveTextShow ''Time
 
 newtype ID a = ID { unID :: Text } deriving (Eq, Ord, Read, Show)
-instance FromJSON (ID a) where
-  parseJSON = withText "id" $ pure . ID
-instance ToJSON (ID a) where
-  toJSON = String . unID
+asID :: ABE.Parse Text (ID a)
+asID = ID <$> ABE.asText
+instance FromJSON (ID a) where parseJSON = ABE.toAesonParser id asID
+instance ToJSON (ID a) where toJSON = String . unID
 makePrisms ''ID
 deriveTextShow ''ID
 
@@ -167,9 +188,9 @@ data Chat
 
 data Message = Message
   { _messageChat         :: Maybe (ID Chat)
-  , _messageUser         :: ID User
+  , _messageUser         :: Maybe (ID User)
   , _messageSubtype      :: Maybe MessageSubtype
-  , _messageText         :: Text
+  , _messageText         :: Maybe Text
   , _messageTS           :: TS
   , _messageEdited       :: Maybe MessageEdited
   , _messageDeletedTS    :: Maybe TS
@@ -177,24 +198,24 @@ data Message = Message
   , _messageHidden       :: Bool
   , _messageAttachments  :: [Attachment]
   , _messageInviter      :: Maybe (ID User)
-  , _messageIsStarred    :: Maybe Bool
+  , _messageIsStarred    :: Bool
   , _messagePinnedTo     :: [ID Channel]
   , _messageReactions    :: [MessageReaction] }
 
 testMessage :: ID Chat -> ID User -> Text -> Message
 testMessage chat from text = Message
   { _messageChat         = Just chat
-  , _messageUser         = from
+  , _messageUser         = Just from
   , _messageSubtype      = Nothing
-  , _messageText         = text
-  , _messageTS           = TS "0"
+  , _messageText         = Just text
+  , _messageTS           = TS 0 0
   , _messageEdited       = Nothing
   , _messageDeletedTS    = Nothing
   , _messageEventTS      = Nothing
   , _messageHidden       = False
   , _messageAttachments  = []
   , _messageInviter      = Nothing
-  , _messageIsStarred    = Nothing
+  , _messageIsStarred    = False
   , _messagePinnedTo     = []
   , _messageReactions    = [] }
 
@@ -203,6 +224,7 @@ data MessageSubtype
   | ChannelJoinMS | ChannelLeaveMS | ChannelTopicMS | ChannelPurposeMS | ChannelNameMS | ChannelArchiveMS | ChannelUnarchiveMS
   | GroupJoinMS   | GroupLeaveMS   | GroupTopicMS   | GroupPurposeMS   | GroupNameMS   | GroupArchiveMS   | GroupUnarchiveMS
   | FileShareMS | FileCommentMS | FileMentionMS
+  | PinnedItemMS | ReminderAddMS | ReminderDeleteMS | BotAddMS
 
 data MessageEdited = MessageEdited
   { _messageEditedUser :: ID User
@@ -214,7 +236,7 @@ data MessageReaction = MessageReaction
   , _messageReactionUsers :: [ID User] }
 
 data Attachment = Attachment
-  { _attachmentFallback    :: Text
+  { _attachmentFallback    :: Maybe Text
   , _attachmentColor       :: Maybe Text
   , _attachmentPretext     :: Maybe Text
   , _attachmentAuthorName  :: Maybe Text
@@ -259,7 +281,7 @@ data File = File
   , _fileURLDownload        :: Text
   , _fileURLPrivate         :: Text
   , _fileURLPrivateDownload :: Text
-  , _fileThumb              :: HM.HashMap Text Text
+  , _fileThumb              :: IntMap Text
   , _filePermalink          :: Text
   , _fileEditLink           :: Text
   , _filePreview            :: Text
@@ -329,7 +351,7 @@ data RtmEvent
   | RtmManualPresenceChange Presence
   | RtmPrefChange PrefChange
   | RtmUserChange User
-  | RtmUserTyping UserTyping
+  | RtmUserTyping (ChatUser Chat)
   | RtmTeamJoin User
   | RtmStarAdded Star
   | RtmStarRemoved Star
@@ -361,12 +383,12 @@ data ChatHistoryChanged a = ChatHistoryChanged
   , _chatHistoryChangedEventTS :: TS }
 
 data IMCreated = IMCreated
-  { _imCreatedUser    :: Text
+  { _imCreatedUser    :: ID User
   , _imCreatedChannel :: IM }
 
 data FileDeleted = FileDeleted
-  { _fileDeletedFileID  :: Text
-  , _fileDeletedEventTS :: Text }
+  { _fileDeletedFileID  :: ID File
+  , _fileDeletedEventTS :: TS }
 
 data FileCommentUpdated = FileCommentUpdated
   { _fileCommentUpdatedFile    :: File
@@ -383,10 +405,6 @@ data PresenceChange = PresenceChange
 data PrefChange = PrefChange
   { _prefChangeName  :: Text
   , _prefChangeValue :: Value }
-
-data UserTyping = UserTyping
-  { _userTypingUser    :: ID User
-  , _userTypingChannel :: ID Chat }
 
 data Star = Star
   { _starUser    :: Text
@@ -457,6 +475,7 @@ deriving instance Eq Team
 deriving instance Eq User
 deriving instance Eq Tz
 deriving instance Eq Profile
+deriving instance Eq Chat
 deriving instance Eq Channel
 deriving instance Eq Group
 deriving instance Eq IM
@@ -485,7 +504,6 @@ deriving instance Eq FileCommentUpdated
 deriving instance Eq FileCommentDeleted
 deriving instance Eq Presence
 deriving instance Eq PresenceChange
-deriving instance Eq UserTyping
 deriving instance Eq PrefChange
 deriving instance Eq Star
 deriving instance Eq StarItem
@@ -522,7 +540,6 @@ makeLenses ''FileDeleted
 makeLenses ''FileCommentUpdated
 makeLenses ''FileCommentDeleted
 makeLenses ''PresenceChange
-makeLenses ''UserTyping
 makeLenses ''PrefChange
 makeLenses ''Star
 makePrisms ''StarItem
@@ -566,7 +583,6 @@ deriveTextShow ''FileDeleted
 deriveTextShow ''FileCommentUpdated
 deriveTextShow ''FileCommentDeleted
 deriveTextShow ''PresenceChange
-deriveTextShow ''UserTyping
 deriveTextShow ''PrefChange
 deriveTextShow ''Star
 deriveTextShow ''StarItem
@@ -578,446 +594,484 @@ instance ToJSON RtmStartRequest where
   toJSON (RtmStartRequest { .. }) = object
     [ ("token", toJSON rtmStartToken) ]
 
-instance FromJSON a => FromJSON (Response a) where
-  parseJSON = withObject "slack reply" $ \ o ->
-    o .: "ok" >>= \ case
-    True -> ResponseOk <$> parseJSON (Object o)
-    False -> ResponseNotOk <$> o .:? "error" .!= "unknown error"
+asResponse :: ABE.Parse Text a -> ABE.Parse Text (Response a)
+asResponse parseInner =
+  ABE.key "ok" ABE.asBool >>= \ case
+    True  -> ResponseOk <$> parseInner
+    False -> ResponseNotOk <$> ABE.keyOrDefault "error" "unknown error" ABE.asText
 
-instance FromJSON RtmStartRp where
-  parseJSON = withObject "rtm.start reply" $ \ o -> RtmStartRp
-    <$> o .: "url"
-    <*> o .: "self"
-    <*> o .: "team"
-    <*> o .: "users"
-    <*> o .: "channels"
-    <*> o .: "groups"
-    <*> o .: "ims"
-    <*> o .: "bots"
+asRtmStartRp :: ABE.Parse Text RtmStartRp
+asRtmStartRp =
+  RtmStartRp
+    <$> ABE.key "url" ABE.asText
+    <*> ABE.key "self" asSelf
+    <*> ABE.key "team" asTeam
+    <*> ABE.key "users" (ABE.eachInArray asUser)
+    <*> ABE.key "channels" (ABE.eachInArray asChannel)
+    <*> ABE.key "groups" (ABE.eachInArray asGroup)
+    <*> ABE.key "ims" (ABE.eachInArray asIM)
+    <*> ABE.key "bots" (ABE.eachInArray asBot)
 
-instance FromJSON Self where
-  parseJSON = withObject "self object" $ \ o -> Self
-    <$> o .: "id"
-    <*> o .: "name"
-    <*> o .: "prefs"
-    <*> o .: "created"
-    <*> o .: "manual_presence"
+asSelf :: ABE.Parse Text Self
+asSelf =
+  Self
+    <$> ABE.key "id" asID
+    <*> ABE.key "name" ABE.asText
+    <*> ABE.key "prefs" ABE.asObject
+    <*> ABE.key "created" asTime
+    <*> ABE.key "manual_presence" asPresence
 
-instance FromJSON Presence where
-  parseJSON = withText "presence value" $ \ case
+asPresence :: ABE.Parse Text Presence
+asPresence =
+  ABE.asText >>= \ case
     "active" -> pure PresenceActive
     "away"   -> pure PresenceAway
-    other    -> fail . unpack $ "unknown presence value " <> other
+    other    -> ABE.throwCustomError $ "unknown presence value " <> other
 
-instance FromJSON Team where
-  parseJSON = withObject "team object" $ \ o -> Team
-    <$> o .: "id"
-    <*> o .: "name"
-    <*> (o .:? "email_domain" >>= \ case
-          Just "" -> pure Nothing
-          Just s  -> pure $ Just s
-          Nothing -> pure Nothing)
-    <*> o .: "domain"
-    <*> (o .:? "msg_edit_window_mins" >>= \ case
-          Just (-1) -> pure Nothing
-          Just i    -> pure $ Just i
-          Nothing   -> pure Nothing)
-    <*> o .: "over_storage_limit"
-    <*> o .: "prefs"
+asTeam :: ABE.Parse Text Team
+asTeam =
+  Team
+    <$> ABE.key "id" asID
+    <*> ABE.key "name" ABE.asText
+    <*> (mfilter (not . null) <$> ABE.keyMay "email_domain" ABE.asText)
+    <*> ABE.key "domain" ABE.asText
+    <*> (mfilter (not . (==) (-1)) <$> ABE.keyMay "msg_edit_window_mins" ABE.asIntegral)
+    <*> ABE.key "over_storage_limit" ABE.asBool
+    <*> ABE.key "prefs" ABE.asObject
 
-instance FromJSON User where
-  parseJSON = withObject "user object" $ \ o -> User
-    <$> o .: "id"
-    <*> o .: "name"
-    <*> o .:? "real_name"
-    <*> o .: "deleted"
-    <*> o .:? "color"
-    <*> ((Just <$> parseJSON (Object o)) <|> pure Nothing) -- tz
-    <*> o .: "profile"
-    <*> o .:? "is_admin" .!= False
-    <*> o .:? "is_owner" .!= False
-    <*> o .:? "is_primary_owner" .!= False
-    <*> o .:? "is_restricted" .!= False
-    <*> o .:? "is_ultra_restricted" .!= False
-    <*> o .:? "has_2fa" .!= False
-    <*> o .:? "two_factor_type"
-    <*> o .:? "has_files" .!= False
-    <*> o .:? "presence"
+asUser :: ABE.Parse Text User
+asUser =
+  User
+    <$> ABE.key "id" asID
+    <*> ABE.key "name" ABE.asText
+    <*> ABE.keyMay "real_name" ABE.asText
+    <*> ABE.key "deleted" ABE.asBool
+    <*> ABE.keyMay "color" ABE.asText
+    <*> ( ( (,,) <$> (join <$> ABE.keyMay "tz" (ABE.perhaps ABE.asText))
+                 <*> ABE.keyMay "tz_label" ABE.asText
+                 <*> ABE.keyMay "tz_offset" ABE.asIntegral )
+        >>= \ (tzMay, labelMay, offsMay) -> pure $ Tz <$> tzMay <*> labelMay <*> offsMay )
+    <*> ABE.key "profile" asProfile
+    <*> ABE.keyOrDefault "is_admin" False ABE.asBool
+    <*> ABE.keyOrDefault "is_owner" False ABE.asBool
+    <*> ABE.keyOrDefault "is_primary_owner" False ABE.asBool
+    <*> ABE.keyOrDefault "is_restricted" False ABE.asBool
+    <*> ABE.keyOrDefault "is_ultra_restricted" False ABE.asBool
+    <*> ABE.keyOrDefault "has_2fa" False ABE.asBool
+    <*> ABE.keyMay "two_factor_type" ABE.asText
+    <*> ABE.keyOrDefault "has_files" False ABE.asBool
+    <*> ABE.keyMay "presence" asPresence
 
-instance FromJSON Tz where
-  parseJSON = withObject "user tz object" $ \ o -> Tz
-    <$> o .: "tz"
-    <*> o .: "tz_label"
-    <*> o .: "tz_offset"
+asProfile :: ABE.Parse Text Profile
+asProfile =
+  Profile
+    <$> ABE.keyMay "first_name" ABE.asText
+    <*> ABE.keyMay "last_name" ABE.asText
+    <*> ABE.keyMay "real_name" ABE.asText
+    <*> ABE.keyMay "real_name_normalized" ABE.asText
+    <*> ABE.keyMay "email" ABE.asText
+    <*> ABE.keyMay "skype" ABE.asText
+    <*> ABE.keyMay "phone" ABE.asText
+    <*> asThumbs
 
-instance FromJSON Profile where
-  parseJSON = withObject "user profile object" $ \ o -> Profile
-    <$> o .:? "first_name"
-    <*> o .:? "last_name"
-    <*> o .:? "real_name"
-    <*> o .:? "real_name_normalized"
-    <*> o .:? "email"
-    <*> o .:? "skype"
-    <*> o .:? "phone"
-    <*> ( mapFromList
-        . catMaybes
-      <$> mapM (\ n -> map (n, ) <$> o .:? ("image_" <> tshow n))
-               [24 :: Int, 32, 48, 72, 192, 512] )
+asThumbs :: ABE.Parse Text (IntMap Text)
+asThumbs = 
+  mapFromList . catMaybes
+    <$> mapM (\ n -> map (n, ) <$> ABE.keyMay ("image_" <> tshow n) ABE.asText)
+             [24 :: Int, 32, 48, 72, 192, 512]
 
-instance FromJSON Channel where
-  parseJSON = withObject "channel object" $ \ o -> Channel
-    <$> o .: "id"
-    <*> o .: "name"
-    <*> o .: "created"
-    <*> o .: "creator"
-    <*> o .: "is_archived"
-    <*> o .:? "is_general" .!= False
-    <*> o .:? "members" .!= []
-    <*> o .:? "topic"
-    <*> o .:? "purpose"
-    <*> o .:? "is_member" .!= False
-    <*> o .:? "last_read"
-    <*> o .:? "latest"
-    <*> o .:? "unread_count"
+asChannel :: ABE.Parse Text Channel
+asChannel =
+  Channel
+    <$> ABE.key "id" asID
+    <*> ABE.key "name" ABE.asText
+    <*> ABE.key "created" asTime
+    <*> ABE.key "creator" asID
+    <*> ABE.key "is_archived" ABE.asBool
+    <*> ABE.keyOrDefault "is_general" False ABE.asBool
+    <*> ABE.keyOrDefault "members" [] (ABE.eachInArray asID)
+    <*> ABE.keyMay "topic" (asSlackTracked ABE.asText)
+    <*> ABE.keyMay "purpose" (asSlackTracked ABE.asText)
+    <*> ABE.keyOrDefault "is_member" False ABE.asBool
+    <*> ABE.keyMay "last_read" asTS
+    <*> ABE.keyMay "latest" asMessage
+    <*> ABE.keyMay "unread_count" ABE.asIntegral
 
-instance FromJSON Group where
-  parseJSON = withObject "group object" $ \ o -> Group
-    <$> o .: "id"
-    <*> o .: "name"
-    <*> o .: "created"
-    <*> o .: "creator"
-    <*> o .: "is_archived"
-    <*> o .:? "members" .!= []
-    <*> o .:? "topic"
-    <*> o .:? "purpose"
-    <*> o .:? "is_open" .!= False
-    <*> o .:? "last_read"
-    <*> o .:? "latest"
-    <*> o .:? "unread_count"
+asGroup :: ABE.Parse Text Group
+asGroup =
+  Group
+    <$> ABE.key "id" asID
+    <*> ABE.key "name" ABE.asText
+    <*> ABE.key "created" asTime
+    <*> ABE.key "creator" asID
+    <*> ABE.key "is_archived" ABE.asBool
+    <*> ABE.keyOrDefault "members" [] (ABE.eachInArray asID)
+    <*> ABE.keyMay "topic" (asSlackTracked ABE.asText)
+    <*> ABE.keyMay "purpose" (asSlackTracked ABE.asText)
+    <*> ABE.keyOrDefault "is_open" False ABE.asBool
+    <*> ABE.keyMay "last_read" asTS
+    <*> ABE.keyMay "latest" asMessage
+    <*> ABE.keyMay "unread_count" ABE.asIntegral
 
-instance FromJSON IM where
-  parseJSON = withObject "im object" $ \ o -> IM
-    <$> o .: "id"
-    <*> o .: "user"
-    <*> o .: "created"
-    <*> o .:? "is_user_deleted" .!= False
-    <*> o .:? "is_open" .!= False
-    <*> o .:? "last_read"
-    <*> o .:? "latest"
-    <*> o .:? "unread_count"
+asIM :: ABE.Parse Text IM
+asIM =
+  IM
+    <$> ABE.key "id" asID
+    <*> ABE.key "user" asID
+    <*> ABE.key "created" asTime
+    <*> ABE.keyOrDefault "is_user_deleted" False ABE.asBool
+    <*> ABE.keyOrDefault "is_open" False ABE.asBool
+    <*> ABE.keyMay "last_read" asTS
+    <*> ABE.keyMay "latest" asMessage
+    <*> ABE.keyMay "unread_count" ABE.asIntegral
 
-instance FromJSON Bot where
-  parseJSON = withObject "bot object" $ \ o -> Bot
-    <$> o .: "id"
-    <*> o .: "name"
-    <*> o .:? "icons" .!= HM.empty
+asBot :: ABE.Parse Text Bot
+asBot =
+  Bot
+    <$> ABE.key "id" asID
+    <*> ABE.key "name" ABE.asText
+    <*> ABE.keyOrDefault "icons" mempty (mapFromList <$> ABE.eachInObject ABE.asText)
 
-instance FromJSON a => FromJSON (SlackTracked a) where
-  parseJSON = withObject "tracked value object" $ \ o -> SlackTracked
-    <$> o .: "value"
-    <*> o .: "creator"
-    <*> o .: "last_set"
+asSlackTracked :: ABE.Parse Text a -> ABE.Parse Text (SlackTracked a)
+asSlackTracked parseValue =
+  SlackTracked
+    <$> ABE.key "value" parseValue
+    <*> ABE.key "creator" asID
+    <*> ABE.key "last_set" asTime
 
-instance FromJSON Message where
-  parseJSON = withObject "message object" $ \ o -> Message
-    <$> o .:? "channel"
-    <*> o .: "user"
-    <*> o .:? "subtype"
-    <*> o .: "text"
-    <*> o .: "ts"
-    <*> o .:? "edited"
-    <*> o .:? "deleted_ts"
-    <*> o .:? "event_ts"
-    <*> o .:? "hidden" .!= False
-    <*> o .:? "attachments" .!= []
-    <*> o .:? "inviter"
-    <*> o .:? "is_starred"
-    <*> o .:? "pinned_to" .!= []
-    <*> o .:? "reactions" .!= []
+asMessage :: ABE.Parse Text Message
+asMessage =
+  Message
+    <$> ABE.keyMay "channel" asID
+    <*> ABE.keyMay "user" asID
+    <*> ABE.keyMay "subtype" asMessageSubtype
+    <*> ABE.keyMay "text" ABE.asText
+    <*> ABE.key "ts" asTS
+    <*> ABE.keyMay "edited" asMessageEdited
+    <*> ABE.keyMay "deleted_ts" asTS
+    <*> ABE.keyMay "event_is" asTS
+    <*> ABE.keyOrDefault "hidden" False ABE.asBool
+    <*> ABE.keyOrDefault "attachments" [] (ABE.eachInArray asAttachment)
+    <*> ABE.keyMay "inviter" asID
+    <*> ABE.keyOrDefault "is_starred" False ABE.asBool
+    <*> ABE.keyOrDefault "pinned_to" [] (ABE.eachInArray asID)
+    <*> ABE.keyOrDefault "reactions" [] (ABE.eachInArray asMessageReaction)
+
+asMessageSubtype :: ABE.Parse Text MessageSubtype
+asMessageSubtype = ABE.asText >>= either ABE.throwCustomError pure . messageSubtypeFromText
+
+messageSubtypeFromText :: Text -> Either Text MessageSubtype
+messageSubtypeFromText = \ case
+  "bot_message"       -> Right BotMS
+  "me_message"        -> Right MeMS
+  "message_changed"   -> Right ChangedMS
+  "message_deleted"   -> Right DeletedMS
+  "channel_join"      -> Right ChannelJoinMS
+  "channel_leave"     -> Right ChannelLeaveMS
+  "channel_topic"     -> Right ChannelTopicMS
+  "channel_purpose"   -> Right ChannelPurposeMS
+  "channel_name"      -> Right ChannelNameMS
+  "channel_archive"   -> Right ChannelArchiveMS
+  "channel_unarchive" -> Right ChannelUnarchiveMS
+  "group_join"        -> Right GroupJoinMS
+  "group_leave"       -> Right GroupLeaveMS
+  "group_topic"       -> Right GroupTopicMS
+  "group_purpose"     -> Right GroupPurposeMS
+  "group_name"        -> Right GroupNameMS
+  "group_archive"     -> Right GroupArchiveMS
+  "group_unarchive"   -> Right GroupUnarchiveMS
+  "file_share"        -> Right FileShareMS
+  "file_comment"      -> Right FileCommentMS
+  "file_mention"      -> Right FileMentionMS
+  "pinned_item"       -> Right PinnedItemMS
+  "reminder_add"      -> Right ReminderAddMS
+  "reminder_delete"   -> Right ReminderDeleteMS
+  "bot_add"           -> Right BotAddMS
+  other               -> Left $ "unknown message subtype " <> other
+
+messageSubtypeToText :: MessageSubtype -> Text
+messageSubtypeToText = \ case
+  BotMS              -> "bot_message"
+  MeMS               -> "me_message"
+  ChangedMS          -> "message_changed"
+  DeletedMS          -> "message_deleted"
+  ChannelJoinMS      -> "channel_join"
+  ChannelLeaveMS     -> "channel_leave"
+  ChannelTopicMS     -> "channel_topic"
+  ChannelPurposeMS   -> "channel_purpose"
+  ChannelNameMS      -> "channel_name"
+  ChannelArchiveMS   -> "channel_archive"
+  ChannelUnarchiveMS -> "channel_unarchive"
+  GroupJoinMS        -> "group_join"
+  GroupLeaveMS       -> "group_leave"
+  GroupTopicMS       -> "group_topic"
+  GroupPurposeMS     -> "group_purpose"
+  GroupNameMS        -> "group_name"
+  GroupArchiveMS     -> "group_archive"
+  GroupUnarchiveMS   -> "group_unarchive"
+  FileShareMS        -> "file_share"
+  FileCommentMS      -> "file_comment"
+  FileMentionMS      -> "file_mention"
+  PinnedItemMS       -> "pinned_item"
+  ReminderAddMS      -> "reminder_add"
+  ReminderDeleteMS   -> "reminder_delete"
+  BotAddMS           -> "bot_add"
 
 instance FromJSON MessageSubtype where
-  parseJSON = withText "message subtype" $ \ case
-    "bot_message"       -> pure BotMS
-    "me_message"        -> pure MeMS
-    "message_changed"   -> pure ChangedMS
-    "message_deleted"   -> pure DeletedMS
-    "channel_join"      -> pure ChannelJoinMS
-    "channel_leave"     -> pure ChannelLeaveMS
-    "channel_topic"     -> pure ChannelTopicMS
-    "channel_purpose"   -> pure ChannelPurposeMS
-    "channel_name"      -> pure ChannelNameMS
-    "channel_archive"   -> pure ChannelArchiveMS
-    "channel_unarchive" -> pure ChannelUnarchiveMS
-    "group_join"        -> pure GroupJoinMS
-    "group_leave"       -> pure GroupLeaveMS
-    "group_topic"       -> pure GroupTopicMS
-    "group_purpose"     -> pure GroupPurposeMS
-    "group_name"        -> pure GroupNameMS
-    "group_archive"     -> pure GroupArchiveMS
-    "group_unarchive"   -> pure GroupUnarchiveMS
-    "file_share"        -> pure FileShareMS
-    "file_comment"      -> pure FileCommentMS
-    "file_mention"      -> pure FileMentionMS
-    other               -> fail . unpack $ "unknown message subtype " <> other
+  parseJSON = ABE.toAesonParser id asMessageSubtype
 
 instance ToJSON MessageSubtype where
-  toJSON = toJSON . \ case
-    BotMS              -> asText "bot_message"
-    MeMS               -> "me_message"
-    ChangedMS          -> "message_changed"
-    DeletedMS          -> "message_deleted"
-    ChannelJoinMS      -> "channel_join"
-    ChannelLeaveMS     -> "channel_leave"
-    ChannelTopicMS     -> "channel_topic"
-    ChannelPurposeMS   -> "channel_purpose"
-    ChannelNameMS      -> "channel_name"
-    ChannelArchiveMS   -> "channel_archive"
-    ChannelUnarchiveMS -> "channel_unarchive"
-    GroupJoinMS        -> "group_join"
-    GroupLeaveMS       -> "group_leave"
-    GroupTopicMS       -> "group_topic"
-    GroupPurposeMS     -> "group_purpose"
-    GroupNameMS        -> "group_name"
-    GroupArchiveMS     -> "group_archive"
-    GroupUnarchiveMS   -> "group_unarchive"
-    FileShareMS        -> "file_share"
-    FileCommentMS      -> "file_comment"
-    FileMentionMS      -> "file_mention"
+  toJSON = toJSON . messageSubtypeToText
 
-instance FromJSON MessageEdited where
-  parseJSON = withObject "message edited object" $ \ o -> MessageEdited
-    <$> o .: "user"
-    <*> o .: "ts"
+asMessageEdited :: ABE.Parse Text MessageEdited
+asMessageEdited =
+  MessageEdited
+    <$> ABE.key "user" asID
+    <*> ABE.key "ts" asTS
 
-instance FromJSON MessageReaction where
-  parseJSON = withObject "message reaction object" $ \ o -> MessageReaction
-    <$> o .: "name"
-    <*> o .: "count"
-    <*> o .: "users"
+asMessageReaction :: ABE.Parse Text MessageReaction
+asMessageReaction =
+  MessageReaction
+    <$> ABE.key "name" ABE.asText
+    <*> ABE.key "count" ABE.asIntegral
+    <*> ABE.key "users" (ABE.eachInArray asID)
 
-instance FromJSON Attachment where
-  parseJSON = withObject "attachment object" $ \ o -> Attachment
-    <$> o .: "fallback"
-    <*> o .:? "color"
-    <*> o .:? "pretext"
-    <*> o .:? "author_name"
-    <*> o .:? "author_link"
-    <*> o .:? "author_icon"
-    <*> o .:? "title"
-    <*> o .:? "title_link"
-    <*> o .:? "text"
-    <*> o .:? "fields" .!= []
-    <*> o .:? "from_url"
-    <*> o .:? "thumb_url"
-    <*> o .:? "thumb_width"
-    <*> o .:? "thumb_height"
-    <*> o .: "id"
+asAttachment :: ABE.Parse Text Attachment
+asAttachment =
+  Attachment
+    <$> ABE.keyMay "fallback" ABE.asText
+    <*> ABE.keyMay "color" ABE.asText
+    <*> ABE.keyMay "pretext" ABE.asText
+    <*> ABE.keyMay "author_name" ABE.asText
+    <*> ABE.keyMay "author_link" ABE.asText
+    <*> ABE.keyMay "author_icon" ABE.asText
+    <*> ABE.keyMay "title" ABE.asText
+    <*> ABE.keyMay "title_link" ABE.asText
+    <*> ABE.keyMay "text" ABE.asText
+    <*> ABE.keyOrDefault "fields" [] (ABE.eachInArray asAttachmentField)
+    <*> ABE.keyMay "from_url" ABE.asText
+    <*> ABE.keyMay "thumb_url" ABE.asText
+    <*> ABE.keyMay "thumb_width" ABE.asIntegral
+    <*> ABE.keyMay "thumb_height" ABE.asIntegral
+    <*> ABE.keyOrDefault "id" 1 ABE.asIntegral -- FIXME? this defaulting is a lie!
 
-instance FromJSON AttachmentField where
-  parseJSON = withObject "attachment field object" $ \ o -> AttachmentField
-    <$> o .: "title"
-    <*> o .: "value"
-    <*> o .: "short"
+asAttachmentField :: ABE.Parse Text AttachmentField
+asAttachmentField =
+  AttachmentField
+    <$> ABE.key "title" ABE.asText
+    <*> ABE.key "value" ABE.asText
+    <*> ABE.key "short" ABE.asBool
 
-instance FromJSON File where
-  parseJSON = withObject "file object" $ \ o -> File
-    <$> o .: "id"
-    <*> o .: "created"
-    <*> o .: "timestamp"
-    <*> o .: "name"
-    <*> o .: "title"
-    <*> o .: "mimetype"
-    <*> o .: "filetype"
-    <*> o .: "pretty_type"
-    <*> o .: "user"
-    <*> o .: "mode"
-    <*> o .: "editable"
-    <*> o .: "is_external"
-    <*> o .: "external_type"
-    <*> o .: "size"
-    <*> o .: "url"
-    <*> o .: "url_download"
-    <*> o .: "url_private"
-    <*> o .: "url_private_download"
-    <*> parseJSON (Object . HM.fromList . concatMap (\ (k, v) -> maybeToList . map (, v) . stripPrefix "thumb_" $ k) . HM.toList $ o)
-    <*> o .: "permalink"
-    <*> o .: "edit_link"
-    <*> o .: "preview"
-    <*> o .: "preview_highlight"
-    <*> o .: "lines"
-    <*> o .: "lines_more"
-    <*> o .: "is_public"
-    <*> o .: "public_url_shared"
-    <*> o .:? "channels" .!= []
-    <*> o .:? "groups" .!= []
-    <*> o .:? "ims" .!= []
-    <*> o .:? "initial_comment"
-    <*> o .:? "num_stars" .!= 0
-    <*> o .:? "is_starred" .!= False
+asFile :: ABE.Parse Text File
+asFile =
+  File
+    <$> ABE.key "id" asID
+    <*> ABE.key "created" asTime
+    <*> ABE.key "timestamp" asTime
+    <*> ABE.key "name" ABE.asText
+    <*> ABE.key "title" ABE.asText
+    <*> ABE.key "mimetype" ABE.asText
+    <*> ABE.key "filetype" ABE.asText
+    <*> ABE.key "pretty_type" ABE.asText
+    <*> ABE.key "user" asID
+    <*> ABE.key "mode" asFileMode
+    <*> ABE.key "editable" ABE.asBool
+    <*> ABE.key "is_external" ABE.asBool
+    <*> ABE.key "external_type" ABE.asText
+    <*> ABE.key "size" ABE.asIntegral
+    <*> ABE.key "url" ABE.asText
+    <*> ABE.key "url_download" ABE.asText
+    <*> ABE.key "url_private" ABE.asText
+    <*> ABE.key "url_private_download" ABE.asText
+    <*> asThumbs
+    <*> ABE.key "permalink" ABE.asText
+    <*> ABE.key "edit_link" ABE.asText
+    <*> ABE.key "preview" ABE.asText
+    <*> ABE.key "preview_highlight" ABE.asText
+    <*> ABE.key "lines" ABE.asIntegral
+    <*> ABE.key "lines_more" ABE.asIntegral
+    <*> ABE.key "is_public" ABE.asBool
+    <*> ABE.key "public_url_shared" ABE.asBool
+    <*> ABE.keyOrDefault "channels" [] (ABE.eachInArray asID)
+    <*> ABE.keyOrDefault "groups" [] (ABE.eachInArray asID)
+    <*> ABE.keyOrDefault "ims" [] (ABE.eachInArray asID)
+    <*> ABE.keyMay "initial_comment" asMessage
+    <*> ABE.keyOrDefault "num_starts" 0 ABE.asIntegral
+    <*> ABE.keyOrDefault "is_starred" False ABE.asBool
 
-instance FromJSON FileMode where
-  parseJSON = withText "file mode" $ \ case
+asFileMode :: ABE.Parse Text FileMode
+asFileMode =
+  ABE.asText >>= \ case
     "hosted"   -> pure FileHosted
     "external" -> pure FileExternal
     "snippet"  -> pure FileSnippet
     "post"     -> pure FilePost
-    other      -> fail . unpack $ "unknown file mode " <> other
+    other      -> ABE.throwCustomError $ "unknown file mode " <> other
 
-instance FromJSON FileComment where
-  parseJSON = withObject "file comment object" $ \ o -> FileComment
-    <$> o .: "id"
-    <*> o .: "timestamp"
-    <*> o .: "user"
-    <*> o .: "comment"
+asFileComment :: ABE.Parse Text FileComment
+asFileComment =
+  FileComment
+    <$> ABE.key "id" asID
+    <*> ABE.key "timestamp" asTime
+    <*> ABE.key "user" asID
+    <*> ABE.key "comment" ABE.asText
 
-instance FromJSON RtmEvent where
-  parseJSON v =
-    let recur :: FromJSON a => Parser a
-        recur = parseJSON v
-    in flip (withObject "event object") v $ \ o ->
-        o .:? "reply_to" >>= \ case
-          Just seqnum ->
-            o .: "ok" >>= \ case
-              True  -> RtmReplyOk seqnum <$> o .:? "ts" <*> o .:? "text"
-              False -> o .: "error" >>= (withObject "RTM error" $ \ o2 -> RtmReplyNotOk seqnum <$> o2 .: "code" <*> o2 .: "msg")
-          Nothing ->
-            o .: "type" >>= pure . asText >>= \ case
-              "hello"                   -> pure RtmHello
-              "message"                 -> RtmMessage <$> recur
-              "channel_marked"          -> RtmChannelMarked <$> recur
-              "channel_created"         -> RtmChannelCreated <$> o .: "channel"
-              "channel_joined"          -> RtmChannelJoined <$> o .: "channel"
-              "channel_left"            -> RtmChannelLeft <$> o .: "channel"
-              "channel_deleted"         -> RtmChannelDeleted <$> o .: "channel"
-              "channel_rename"          -> RtmChannelRenamed <$> o .: "channel"
-              "channel_archive"         -> RtmChannelArchive <$> recur
-              "channel_unarchive"       -> RtmChannelUnarchive <$> recur
-              "channel_history_changed" -> RtmChannelHistoryChanged <$> recur
-              "im_created"              -> RtmIMCreated <$> recur
-              "im_open"                 -> RtmIMOpen <$> recur
-              "im_close"                -> RtmIMClose <$> recur
-              "im_marked"               -> RtmIMMarked <$> recur
-              "im_history_changed"      -> RtmIMHistoryChanged <$> recur
-              "group_joined"            -> RtmGroupJoined <$> o .: "channel"
-              "group_left"              -> RtmGroupLeft <$> o .: "channel"
-              "group_open"              -> RtmGroupOpen <$> recur
-              "group_close"             -> RtmGroupClose <$> recur
-              "group_archive"           -> RtmGroupArchive <$> o .: "channel"
-              "group_unarchive"         -> RtmGroupUnarchive <$> o .: "channel"
-              "group_rename"            -> RtmGroupRename <$> o .: "channel"
-              "group_marked"            -> RtmGroupMarked <$> recur
-              "group_history_changed"   -> RtmGroupHistoryChanged <$> recur
-              "file_created"            -> RtmFileCreated <$> o .: "file"
-              "file_shared"             -> RtmFileShared <$> o .: "file"
-              "file_unshared"           -> RtmFileUnshared <$> o .: "file"
-              "file_public"             -> RtmFilePublic <$> o .: "file"
-              "file_private"            -> RtmFilePrivate <$> o .: "file"
-              "file_change"             -> RtmFileChange <$> o .: "file"
-              "file_deleted"            -> RtmFileDeleted <$> recur
-              "file_comment_added"      -> RtmFileCommentAdded <$> recur
-              "file_comment_edited"     -> RtmFileCommentEdited <$> recur
-              "file_comment_deleted"    -> RtmFileCommentDeleted <$> recur
-              "presence_change"         -> RtmPresenceChange <$> recur
-              "manual_presence_change"  -> RtmManualPresenceChange <$> o .: "presence"
-              "user_typing"             -> RtmUserTyping <$> recur
-              "pref_change"             -> RtmPrefChange <$> recur
-              "user_change"             -> RtmUserChange <$> o .: "user"
-              "team_join"               -> RtmTeamJoin <$> o .: "user"
-              "star_added"              -> RtmStarAdded <$> recur
-              "star_removed"            -> RtmStarRemoved <$> recur
-              "emoji_changed"           -> RtmEmojiChanged <$> o .: "event_ts"
-              "commands_changed"        -> RtmCommandsChanged <$> o .: "event_ts"
-              "team_pref_change"        -> RtmTeamPrefChange <$> recur
-              "team_rename"             -> RtmTeamRename <$> o .: "name"
-              "team_domain_change"      -> RtmTeamDomainChange <$> recur
-              "email_domain_changed"    -> RtmEmailDomainChanged <$> recur
-              "bot_added"               -> RtmBotAdded <$> o .: "bot"
-              "bot_changed"             -> RtmBotChanged <$> o .: "bot"
-              "accounts_changed"        -> pure RtmAccountsChanged
-              other                     -> fail . unpack $ "unknown RTM event type " <> other
+asRtmEvent :: ABE.Parse Text RtmEvent
+asRtmEvent =
+  ABE.keyMay "reply_to" ABE.asIntegral >>= \ case
+    Just seqnum -> 
+      ABE.key "ok" ABE.asBool >>= \ case
+        True  -> RtmReplyOk seqnum <$> ABE.keyMay "ts" asTS
+                                   <*> ABE.keyMay "text" ABE.asText
+        False -> ABE.key "error" ( RtmReplyNotOk seqnum <$> ABE.key "code" ABE.asIntegral
+                                                        <*> ABE.key "msg" ABE.asText )
+    Nothing ->
+      ABE.key "type" ABE.asText >>= \ case
+        "hello"                   -> pure RtmHello
+        "message"                 -> RtmMessage <$> asMessage
+        "channel_marked"          -> RtmChannelMarked <$> asChatMarked 
+        "channel_created"         -> RtmChannelCreated <$> ABE.key "channel" asChannel
+        "channel_joined"          -> RtmChannelJoined <$> ABE.key "channel" asChannel
+        "channel_left"            -> RtmChannelLeft <$> ABE.key "channel" asID
+        "channel_deleted"         -> RtmChannelDeleted <$> ABE.key "channel" asID
+        "channel_rename"          -> RtmChannelRenamed <$> ABE.key "channel" asChatRenamed
+        "channel_archive"         -> RtmChannelArchive <$> asChatUser
+        "channel_unarchive"       -> RtmChannelUnarchive <$> asChatUser
+        "channel_history_changed" -> RtmChannelHistoryChanged <$> asChatHistoryChanged
+        "im_created"              -> RtmIMCreated <$> asIMCreated
+        "im_open"                 -> RtmIMOpen <$> asChatUser
+        "im_close"                -> RtmIMClose <$> asChatUser
+        "im_marked"               -> RtmIMMarked <$> asChatMarked
+        "im_history_changed"      -> RtmIMHistoryChanged <$> asChatHistoryChanged
+        "group_joined"            -> RtmGroupJoined <$> ABE.key "channel" asGroup
+        "group_left"              -> RtmGroupLeft <$> ABE.key "channel" asID
+        "group_open"              -> RtmGroupOpen <$> asChatUser
+        "group_close"             -> RtmGroupClose <$> asChatUser
+        "group_archive"           -> RtmGroupArchive <$> ABE.key "channel" asID
+        "group_unarchive"         -> RtmGroupUnarchive <$> ABE.key "channel" asID
+        "group_rename"            -> RtmGroupRename <$> ABE.key "channel" asChatRenamed
+        "group_marked"            -> RtmGroupMarked <$> asChatMarked
+        "group_history_changed"   -> RtmGroupHistoryChanged <$> asChatHistoryChanged
+        "file_created"            -> RtmFileCreated <$> ABE.key "file" asFile
+        "file_shared"             -> RtmFileShared <$> ABE.key "file" asFile
+        "file_unshared"           -> RtmFileUnshared <$> ABE.key "file" asFile
+        "file_public"             -> RtmFilePublic <$> ABE.key "file" asFile
+        "file_private"            -> RtmFilePrivate <$> ABE.key "file" asID
+        "file_change"             -> RtmFileChange <$> ABE.key "file" asFile
+        "file_deleted"            -> RtmFileDeleted <$> asFileDeleted
+        "file_comment_added"      -> RtmFileCommentAdded <$> asFileCommentUpdated
+        "file_comment_edited"     -> RtmFileCommentEdited <$> asFileCommentUpdated
+        "file_comment_deleted"    -> RtmFileCommentDeleted <$> asFileCommentDeleted
+        "presence_change"         -> RtmPresenceChange <$> asPresenceChange
+        "manual_presence_change"  -> RtmManualPresenceChange <$> ABE.key "presence" asPresence
+        "user_typing"             -> RtmUserTyping <$> asChatUser
+        "pref_change"             -> RtmPrefChange <$> asPrefChange
+        "user_change"             -> RtmUserChange <$> ABE.key "user" asUser
+        "team_join"               -> RtmTeamJoin <$> ABE.key "user" asUser
+        "star_added"              -> RtmStarAdded <$> asStar
+        "star_removed"            -> RtmStarRemoved <$> asStar
+        "emoji_changed"           -> RtmEmojiChanged <$> ABE.key "event_ts" asTS
+        "commands_changed"        -> RtmCommandsChanged <$> ABE.key "event_ts" asTS
+        "team_pref_change"        -> RtmTeamPrefChange <$> asPrefChange
+        "team_rename"             -> RtmTeamRename <$> ABE.key "name" ABE.asText
+        "team_domain_change"      -> RtmTeamDomainChange <$> asTeamDomainChange
+        "email_domain_changed"    -> RtmEmailDomainChanged <$> asEmailDomainChanged
+        "bot_added"               -> RtmBotAdded <$> ABE.key "bot" asBot
+        "bot_changed"             -> RtmBotChanged <$> ABE.key "bot" asBot
+        "accounts_changed"        -> pure RtmAccountsChanged
+        other                     -> ABE.throwCustomError $ "unknown RTM event type " <> other
 
 
-instance FromJSON (ChatMarked a) where
-  parseJSON = withObject "channel / im / group marked event" $ \ o -> ChatMarked
-    <$> o .: "channel"
-    <*> o .: "ts"
+asChatMarked :: ABE.Parse Text (ChatMarked a)
+asChatMarked =
+  ChatMarked
+    <$> ABE.key "channel" asID
+    <*> ABE.key "ts" asTS
 
-instance FromJSON (ChatUser a) where
-  parseJSON = withObject "channel and user from event" $ \ o -> ChatUser
-    <$> o .: "channel"
-    <*> o .: "user"
+asChatUser :: ABE.Parse Text (ChatUser a)
+asChatUser =
+  ChatUser
+    <$> ABE.key "channel" asID
+    <*> ABE.key "user" asID
 
-instance FromJSON (ChatRenamed a) where
-  parseJSON = withObject "channel and new name from event" $ \ o -> ChatRenamed
-    <$> o .: "id"
-    <*> o .: "name"
+asChatRenamed :: ABE.Parse Text (ChatRenamed a)
+asChatRenamed =
+  ChatRenamed
+    <$> ABE.key "id" asID
+    <*> ABE.key "name" ABE.asText
 
-instance FromJSON (ChatHistoryChanged a) where
-  parseJSON = withObject "channel history changed event" $ \ o -> ChatHistoryChanged
-    <$> o .: "latest"
-    <*> o .: "ts"
-    <*> o .: "event_ts"
+asChatHistoryChanged :: ABE.Parse Text (ChatHistoryChanged a)
+asChatHistoryChanged =
+  ChatHistoryChanged
+    <$> ABE.key "latest" ABE.asText
+    <*> ABE.key "ts" asTS
+    <*> ABE.key "event_ts" asTS
 
-instance FromJSON IMCreated where
-  parseJSON = withObject "im created event" $ \ o -> IMCreated
-    <$> o .: "user"
-    <*> o .: "channel"
+asIMCreated :: ABE.Parse Text IMCreated
+asIMCreated =
+  IMCreated
+    <$> ABE.key "user" asID
+    <*> ABE.key "channel" asIM
 
-instance FromJSON FileDeleted where
-  parseJSON = withObject "file deleted event" $ \ o -> FileDeleted
-    <$> o .: "file_id"
-    <*> o .: "event_ts"
+asFileDeleted :: ABE.Parse Text FileDeleted
+asFileDeleted =
+  FileDeleted
+    <$> ABE.key "file_id" asID
+    <*> ABE.key "event_ts" asTS
 
-instance FromJSON FileCommentUpdated where
-  parseJSON = withObject "file comment event" $ \ o -> FileCommentUpdated
-    <$> o .: "file"
-    <*> o .: "comment"
+asFileCommentUpdated :: ABE.Parse Text FileCommentUpdated
+asFileCommentUpdated =
+  FileCommentUpdated
+    <$> ABE.key "file" asFile
+    <*> ABE.key "comment" asFileComment
 
-instance FromJSON FileCommentDeleted where
-  parseJSON = withObject "file comment deleted event" $ \ o -> FileCommentDeleted
-    <$> o .: "file"
-    <*> o .: "comment"
+asFileCommentDeleted :: ABE.Parse Text FileCommentDeleted
+asFileCommentDeleted =
+  FileCommentDeleted
+    <$> ABE.key "file" asFile
+    <*> ABE.key "comment" asID
 
-instance FromJSON PresenceChange where
-  parseJSON = withObject "presence change event" $ \ o -> PresenceChange
-    <$> o .: "user"
-    <*> o .: "presence"
+asPresenceChange :: ABE.Parse Text PresenceChange
+asPresenceChange =
+  PresenceChange
+    <$> ABE.key "user" asID
+    <*> ABE.key "presence" asPresence
 
-instance FromJSON UserTyping where
-  parseJSON = withObject "user typing event" $ \ o -> UserTyping
-    <$> o .: "user"
-    <*> o .: "channel"
+asPrefChange :: ABE.Parse Text PrefChange
+asPrefChange =
+  PrefChange
+    <$> ABE.key "name" ABE.asText
+    <*> ABE.key "value" (ABEI.withValue Right)
 
-instance FromJSON PrefChange where
-  parseJSON = withObject "pref change event" $ \ o -> PrefChange
-    <$> o .: "name"
-    <*> o .: "value"
+asStar :: ABE.Parse Text Star
+asStar =
+  Star
+    <$> ABE.key "user" ABE.asText
+    <*> ABE.key "item" asStarItem
+    <*> ABE.key "event_ts" asTS
 
-instance FromJSON Star where
-  parseJSON = withObject "star event" $ \ o -> Star
-    <$> o .: "user"
-    <*> o .: "item"
-    <*> o .: "event_ts"
+asStarItem :: ABE.Parse Text StarItem
+asStarItem =
+  ABE.key "type" ABE.asText >>= \ case
+    "message"      -> StarItemMessage     <$> ABE.key "message" asMessage
+    "file"         -> StarItemFile        <$> ABE.key "file" asFile
+    "file_comment" -> StarItemFileComment <$> ABE.key "file" asFile <*> ABE.key "comment" asFileComment
+    "channel"      -> StarItemChannel     <$> ABE.key "channel" asID
+    "im"           -> StarItemIM          <$> ABE.key "im" asID
+    "group"        -> StarItemGroup       <$> ABE.key "group" asID
+    other          -> ABE.throwCustomError $ "unknown starrable item type " <> other
 
-instance FromJSON StarItem where
-  parseJSON = withObject "starred item reference" $ \ o -> o .: "type" >>= pure . asText >>= \ case
-    "message"      -> StarItemMessage     <$> o .: "message"
-    "file"         -> StarItemFile        <$> o .: "file"
-    "file_comment" -> StarItemFileComment <$> o .: "file" <*> o .: "comment"
-    "channel"      -> StarItemChannel     <$> o .: "channel"
-    "im"           -> StarItemIM          <$> o .: "im"
-    "group"        -> StarItemGroup       <$> o .: "group"
-    other          -> fail . unpack $ "unknown starrable item type " <> other
+asTeamDomainChange :: ABE.Parse Text TeamDomainChange
+asTeamDomainChange =
+  TeamDomainChange
+    <$> ABE.key "url" ABE.asText
+    <*> ABE.key "domain" ABE.asText
 
-instance FromJSON TeamDomainChange where
-  parseJSON = withObject "team domain change event" $ \ o -> TeamDomainChange
-    <$> o .: "url"
-    <*> o .: "domain"
-
-instance FromJSON EmailDomainChanged where
-  parseJSON = withObject "email domain changed event" $ \ o -> EmailDomainChanged
-    <$> o .: "email_domain"
-    <*> o .: "event_ts"
+asEmailDomainChanged :: ABE.Parse Text EmailDomainChanged
+asEmailDomainChanged =
+  EmailDomainChanged
+    <$> ABE.key "email_domain" ABE.asText
+    <*> ABE.key "event_ts" asTS
 
 instance ToJSON RtmSendMessage where
   toJSON (RtmSendMessage seqnum chat message) = object

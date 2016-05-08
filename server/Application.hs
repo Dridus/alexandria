@@ -69,8 +69,14 @@ makeFoundation appSettings = do
   return $ mkFoundation pool
 
 createTypes :: Migration
-createTypes =
+createTypes = do
   createEnum "message_subtype" (Proxy :: Proxy MessageSubtype)
+
+tellSafeMigrationSql :: [Text] -> Migration
+tellSafeMigrationSql = lift . tell . map (False,)
+
+tellMigrationError :: [Text] -> Migration
+tellMigrationError = tell
 
 createEnum :: forall proxy a. (Bounded a, Enum a, Ord a, PersistField a, TextShow a) => Text -> proxy a -> Migration
 createEnum typname _ = do
@@ -85,7 +91,7 @@ createEnum typname _ = do
   (lift . lift $ rawSql "SELECT oid, typtype FROM pg_type WHERE typname = ?" [toPersistValue typname]) >>= \ case
     [] -> 
       let quotedValues = intercalate ", " (map (\ value -> "'" <> quoteValue value <> "'") . toList $ allValues)
-      in lift . tell $ [(False, "CREATE TYPE " <> escape typnameDb <> " AS ENUM(" <> quotedValues <> ")")]
+      in tellSafeMigrationSql ["CREATe TYPE " <> escape typnameDb <> " AS ENUM(" <> quotedValues <> ")"]
 
     [(Single oid, Single "e")] -> do
       existingValues <- setFromList . map unSingle
@@ -93,20 +99,23 @@ createEnum typname _ = do
       let missingValues = allValues `difference` existingValues
           extraValues = existingValues `difference` allValues
 
-          addValue value = "ALTER TYPE " <> escape typnameDb <> " ADD VALUE '" <> quoteValue value
+          addValue value = "ALTER TYPE " <> escape typnameDb <> " ADD VALUE '" <> quoteValue value <> "'"
 
       unless (null extraValues) $
-        tell $ [typname <> " has extra enum values " <> showt (toList extraValues)]
-      unless (null missingValues) $
-        lift . tell . map ((False,) . addValue) . toList $ missingValues
+        tellMigrationError [typname <> " has extra enum values " <> showt (toList extraValues)]
+      unless (null missingValues) $ do
+        tellSafeMigrationSql
+          $  ["COMMIT"] -- FIXME? dunno why alter tables go fine but not alter type, but this seems to fix it up
+          <> map addValue (toList missingValues)
+          <> ["BEGIN TRANSACTION"] -- FIXME as above
 
       pure ()
 
     [(Single _, Single other)] ->
-      tell $ [typname <> " exists but is of type " <> other <> " not e (enum)"]
+      tellMigrationError $ [typname <> " exists but is of type " <> other <> " not e (enum)"]
 
     rows ->
-      tell $ ["Got multiple results for the " <> typname <> " query?"] ++ map tshow rows
+      tellMigrationError $ ["Got multiple results for the " <> typname <> " query?"] ++ map tshow rows
 
 makeApplication :: App -> IO Application
 makeApplication foundation = do

@@ -3,7 +3,7 @@ module Importer where
 import Application (makeFoundation)
 import ClassyPrelude
 import Control.Lens (view)
-import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.BetterErrors as ABE
 import Database.Persist (Entity(Entity), Filter, entityKey, entityVal, getBy, insert, replace, repsert)
 import Database.Persist.Sql (deleteWhereCount, runSqlPool)
 import Foundation (appConnPool)
@@ -11,6 +11,7 @@ import Model
 import Options.Applicative (Parser, strOption, short, long, metavar, strArgument, info, progDesc, fullDesc, execParser, helper, switch, help)
 import qualified Slack
 import System.Directory (doesFileExist, getDirectoryContents)
+import System.Exit (exitWith, ExitCode(ExitFailure))
 import System.FilePath.Posix (takeExtensions)
 import Yesod.Default.Config2 (loadYamlSettings, useEnv)
 
@@ -57,14 +58,19 @@ importerMain = do
     channelsDeleted <- deleteWhereCount ([] :: [Filter Channel])
     putStrLn $ " " <> tshow channelsDeleted <> " deleted."
 
+  let barfReading file err = do
+        hPutStrLn stderr . unpack . (("while reading " <> file <> ":\n") <>)
+          . intercalate "\n" . ABE.displayError id $ err
+        exitWith (ExitFailure 1)
+
   putStrLn "reading users.json"
-  users    <- either (fail . ("while reading users.json: " <>)) pure . Aeson.eitherDecodeStrict'
+  users    <- either (barfReading "users.json") pure . ABE.parse (ABE.eachInArray Slack.asUser)
           =<< readFile (optInputDir </> "users.json")
 
   let _ = users :: [Slack.User]
 
   putStrLn "reading channels.json"
-  channels <- either (fail . ("while reading channels.json: " <>)) pure . Aeson.eitherDecodeStrict'
+  channels <- either (barfReading "channels.json") pure . ABE.parse (ABE.eachInArray Slack.asChannel)
           =<< readFile (optInputDir </> "channels.json")
 
   let _ = channels :: [Slack.Channel]
@@ -86,21 +92,19 @@ importerMain = do
       putStr $ " ... " <> pack file
       -- FIXME? this doesn't even vaguely attempt to stream
       bytes <- readFile file
-      messages <- either fail pure $ Aeson.eitherDecodeStrict' bytes
+      messages <- either (barfReading $ pack file) pure $ ABE.parse (ABE.eachInArray Slack.asMessage) bytes
       let _ = messages :: [Slack.Message]
       putStrLn $ " (" <> tshow (length messages) <> " items)"
 
-      withDB $ do
-        forM_ messages $ \ slackMessage ->
-          case Model.fromSlackMessage slackMessage of
-            Nothing -> pure ()
-            Just modelMessage -> do
-              key <- getBy (UniqueMessage (view messageChannel modelMessage) (view messageTs modelMessage)) >>= \ case
-                Just (Entity k _) -> replace k modelMessage *> pure k
-                Nothing           -> insert modelMessage
+      forM_ messages $ \ slackMessage -> do
+        let modelMessage = Model.fromSlackMessage (view Slack.channelID channel) slackMessage
+        withDB $ do
+          key <- getBy (UniqueMessage (view messageChannel modelMessage) (view messageTs modelMessage)) >>= \ case
+            Just (Entity k _) -> replace k modelMessage *> pure k
+            Nothing           -> insert modelMessage
 
-              -- mapM_ insert $ Model.attachmentsFromSlackMessage =<< messages
-              -- mapM_ insert $ Model.reactionsFromSlackMessage =<< messages
-              --
-              pure ()
+          -- mapM_ insert $ Model.attachmentsFromSlackMessage =<< messages
+          -- mapM_ insert $ Model.reactionsFromSlackMessage =<< messages
+          --
+          pure ()
 

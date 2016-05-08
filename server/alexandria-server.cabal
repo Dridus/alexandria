@@ -59,47 +59,49 @@ library
 
 
     build-depends: base
-                 , yesod
-                 , yesod-core
-                 , yesod-static
+                 , aeson
+                 , aeson-better-errors
+                 , bytestring
+                 , case-insensitive
                  , classy-prelude
                  , classy-prelude-conduit
                  , classy-prelude-yesod
-                 , bytestring
-                 , text
+                 , conduit
+                 , containers
+                 , data-default
+                 , directory
+                 , directory
+                 , fast-logger
+                 , file-embed
+                 , filepath
+                 , http-api-data
+                 , http-conduit
+                 , lens
+                 , monad-control
+                 , monad-logger
+                 , mtl
+                 , optparse-applicative
+                 , path-pieces
                  , persistent
                  , persistent-postgresql
                  , persistent-template
-                 , template-haskell
-                 , monad-control
-                 , wai-extra
-                 , yaml
-                 , http-conduit
-                 , directory
-                 , warp
-                 , data-default
-                 , aeson
-                 , conduit
-                 , monad-logger
-                 , fast-logger
-                 , wai-logger
-                 , file-embed
+                 , resourcet
                  , safe
-                 , unordered-containers
-                 , containers
-                 , vector
-                 , time
-                 , case-insensitive
-                 , wai
-                 , text-show
-                 , lens
                  , scientific
-                 , optparse-applicative
-                 , path-pieces
-                 , http-api-data
-                 , mtl
-                 , directory
-                 , filepath
+                 , template-haskell
+                 , text
+                 , text-show
+                 , time
+                 , unordered-containers
+                 , vector
+                 , wai
+                 , wai-extra
+                 , wai-logger
+                 , warp
+                 , yaml
+                 , yesod
+                 , yesod-core
+                 , yesod-static
 
 executable         alexandria-server
     if flag(library-only)

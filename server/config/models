@@ -1,17 +1,19 @@
 Message json
   channel SlackChannelId
   ts Slack.TS
-  user SlackUserId
+  tsT UTCTime
+  user SlackUserId Maybe
   subtype Slack.MessageSubtype Maybe
-  text Text
+  text Text Maybe
   editedUser SlackUserId Maybe
   editedTs Slack.TS Maybe
+  editedTsT UTCTime Maybe
   UniqueMessage channel ts
 
 MessageAttachment json
   message MessageId
   number Int
-  fallback Text
+  fallback Text Maybe
   color Text Maybe
   pretext Text Maybe
   authorName Text Maybe

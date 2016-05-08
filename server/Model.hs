@@ -39,19 +39,17 @@ fromSlackChannel = Entity
     <*> view Slack.channelIsGeneral
     <*> fromMaybe "" . preview (Slack.channelTopic . _Just . Slack.trackedValue) )
 
-fromSlackMessage :: Slack.Message -> Maybe Message
-fromSlackMessage message =
-  flip fromMessageWithChannel message
-    <$> preview (Slack.messageChat . _Just . Slack.typedID) message
-  where
-    fromMessageWithChannel channelKey = Message
-      <$> pure channelKey
-      <*> view Slack.messageTS
-      <*> view Slack.messageUser
-      <*> view Slack.messageSubtype
-      <*> view Slack.messageText
-      <*> preview (Slack.messageEdited . _Just . Slack.messageEditedUser)
-      <*> preview (Slack.messageEdited . _Just . Slack.messageEditedTS)
+fromSlackMessage :: SlackChannelId -> Slack.Message -> Message
+fromSlackMessage channelKey = Message
+  <$> pure channelKey
+  <*> view Slack.messageTS
+  <*> view (Slack.messageTS . to Slack.tsToUTCTime)
+  <*> view Slack.messageUser
+  <*> view Slack.messageSubtype
+  <*> view Slack.messageText
+  <*> preview (Slack.messageEdited . _Just . Slack.messageEditedUser)
+  <*> preview (Slack.messageEdited . _Just . Slack.messageEditedTS)
+  <*> preview (Slack.messageEdited . _Just . Slack.messageEditedTS . to Slack.tsToUTCTime)
 
 fromSlackAttachment :: MessageId -> Slack.Attachment -> MessageAttachment
 fromSlackAttachment messageId = MessageAttachment
