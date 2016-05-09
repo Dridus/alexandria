@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/Dridus/alexandria.svg?branch=master)](https://travis-ci.org/Dridus/alexandria)
+
 # Building the Server
 
 1. Clone this project
